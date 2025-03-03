@@ -1,17 +1,38 @@
 model:
   type: inf-llm
-  path: openbmb/MiniCPM-2B-sft-bf16
+  path: /home/garry/llm/models/MiniCPM-2B-sft-bf16/
   block_size: 128
+
+  # Initital tokens as attention sinks
   n_init: 128
+  # Local sliding window size
   n_local: 2048
-  topk: 16
+
+  # Number of memory units to retrieve for attention computation.
+  topk: 10
+  # The number of top-scoring tokens per memory unit considered as representative elements.
   repr_topk: 4
-  max_cached_block: 32
+  # Maximum number of memory units stored in GPU memory.
+  max_cached_block: 15
+
+  # Number of tokens queried at a time as an execution block.
+  # Each execution block retrieves topk memory units once.
   exc_block_size: 512
+  # Use flash-attention or not.
   fattn: false
+
+  # RoPE base and distance_scale
   base: 10000
   distance_scale: 1.0
 
-max_len: 2147483647
-chunk_size: 8192
+#max_len: 2147483647
+max_len: 8192
+# Chunked input in decoding.
+# To save GPU memory. (FFN block)
+chunk_size: 2048
 conv_type: minicpm
+
+# truncation type. Now supports suffix only.
+truncation: suffix
+
+model_name: minicpm

@@ -1,4 +1,6 @@
 import torch
+import time
+from tqdm import tqdm
 
 class GreedySearch:
     def __init__(self, model, tokenizer):
@@ -44,9 +46,13 @@ class GreedySearch:
         past_key_values = self.past_kv
         if output:
             output_text = ""
-        
-        for i in range(max_length + 1):
-            if i == 0:
+
+        step_times = torch.zeros(size=(max_length + 1,), dtype=torch.float32, device="cpu")
+
+        for i in tqdm(range(max_length + 1), desc="generating tokens"):
+            start_time = time.perf_counter()
+
+            if i == 0: # prefill
                 if chunk_size is None:
                     chunk_size = input_ids.size(1)
                 for st in range(0, input_ids.size(1) - 1, chunk_size):
@@ -68,7 +74,7 @@ class GreedySearch:
                     past_key_values = past_key_values
                 )
                 logits, past_key_values = out.logits, out.past_key_values
-            else:
+            else: # decode
                 out = self.model(
                     input_ids = input_ids[:, -1:],
                     attention_mask = attention_mask,
@@ -78,11 +84,15 @@ class GreedySearch:
                 )
                 logits, past_key_values = out.logits, out.past_key_values
 
+            end_time = time.perf_counter()
+            step_times[i] = end_time - start_time
+
             logits = logits[:, -1, :]
             word = logits.argmax(dim=-1)
             if word.item() in end_token_ids or i == max_length:
                 break
 
+            # 经历 1 次 prefill + max_length 次 decode，最后一次 decode 的结果会抛弃
             input_ids = torch.cat((input_ids, word.view(1, 1)), dim=-1)
             attention_mask = torch.cat(
                 (attention_mask, torch.ones((attention_mask.size(0), 1), dtype=torch.int, device=attention_mask.device)),
@@ -101,5 +111,9 @@ class GreedySearch:
         if output:
             sys.stdout.write("\n")
             sys.stdout.flush()
+
+        prefill_step = step_times[0]
+        decode_step = step_times[1:].mean()
+        print(f"prefill step time: {prefill_step*1000:.3f}ms, decode step time: {decode_step*1000:.3f}ms")
 
         return [self.tokenizer.decode(input_ids.squeeze(0)[length:])]

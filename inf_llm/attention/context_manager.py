@@ -2,7 +2,7 @@ import torch
 from typing import Optional, Tuple
 from copy import deepcopy
 from .dot_production_attention import get_multi_stage_dot_production_attention
-
+import time
 class CudaCache:
     def __init__(self, num_units, unit_size, dtype):
         self.num_units = num_units
@@ -60,7 +60,34 @@ class MemoryUnit:
         self.gpu_data_id = gpu_data_id
         self.event = event
 
-    def load(self, target: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> bool:
+    def load(self, target: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, force_load: bool = False) -> bool:
+        if force_load:
+            if self.gpu_data_id is not None:
+                gpu_data = self.gpu_data
+                gpu_data_id = self.gpu_data_id
+            else:
+                gpu_data, gpu_data_id = self.cache.alloc()
+                gpu_data = gpu_data.view((2,) + self.cpu_data[0].shape)
+            if target is not None:
+                target[0].copy_(self.cpu_data[0], non_blocking=True)
+                target[1].copy_(self.cpu_data[1], non_blocking=True)
+                target_event = torch.cuda.Event()
+                target_event.record(torch.cuda.current_stream())
+                gpu_data[0].copy_(target[0], non_blocking=True)
+                gpu_data[1].copy_(target[1], non_blocking=True)
+
+            else:
+                gpu_data[0].copy_(self.cpu_data[0], non_blocking=True)
+                gpu_data[1].copy_(self.cpu_data[1], non_blocking=True)
+
+            event = torch.cuda.Event()
+            event.record(torch.cuda.current_stream())
+            self.event = event
+            self.gpu_data = gpu_data
+            self.gpu_data_id = gpu_data_id
+
+            return True # 返回 True 代表进行了 CPU-> GPU 传输，False 代表没有进行 CPU-> GPU 传输
+
         if self.gpu_data is not None:
             if target is not None:
                 target[0].copy_(self.gpu_data[0], non_blocking=True)
@@ -70,8 +97,7 @@ class MemoryUnit:
             else:
                 target_event = None
 
-
-            return False, target_event
+            return False
 
         gpu_data, gpu_data_id = self.cache.alloc()
         gpu_data = gpu_data.view((2,) + self.cpu_data[0].shape)
@@ -93,7 +119,7 @@ class MemoryUnit:
         self.gpu_data = gpu_data
         self.gpu_data_id = gpu_data_id
 
-        return True, target_event
+        return True
 
     def get(self):
         assert self.gpu_data is not None
@@ -375,6 +401,7 @@ class ContextManager:
             global_h_q = global_h_q.reshape(self.num_units, self.dim_head * self.unit_size)
             ret = []
             for u in range(self.num_units):
+                # self.block_k 存放的是代表 token
                 ret.append(self.block_k[u].get_topk(global_h_q[u], self.topk))
 
         else:
@@ -384,30 +411,57 @@ class ContextManager:
 
 
     def get_global_hidden_and_mask(
-        self, len_q, block_topk
-    ):
+        self, len_q, block_topk, force_load:bool = False
+    ): # TODO：可以优化的点：buffer 和 cached_blocks 之间需要来回拷贝
         assert len(block_topk) == self.num_units
         global_block_map = [[] for _ in range(self.num_units)]
         global_remainder_len = max(self._global_remainder_ed - self._global_remainder_st + len_q - self.n_local, 0)
         init_len = self.init_k.size(-2)
         sliding_window = None
 
+        # self.global_buffer [topk blocks | init block | local blocks]
         global_h_k = self.global_buffer[0]
         global_h_v = self.global_buffer[1]
 
         block_num = len(block_topk[0])
+
+        # 把 topk block 放到 self.global_buffer 当中
+        # 1. 如果 block 不在 GPU 当中，先从 CPU 导到 CPU，再拷贝一份到 CUDACache 当中 [CPU->GPU、GPU->GPU]
+        # 2. 如果 block 在 CUDACache 当中但不在 buffer 当中，从 CUDACache 拷贝一份到 buffer 当中 [GPU->GPU]
+        # 3. 如果 block 在 buffer 当中，不需要任何处理
         for u in range(self.num_units):
             assert len(block_topk[u]) == block_num
 
             block_topk[u].sort()
+            # buffer 当中的 block（topk个），实际的 KV 存储在 self.global_buffer 当中
             global_block_map[u] = deepcopy(self.global_buffer_block_id_list[u])
+
+            num_pcie_transfer = 0 # 实际进行了 CPU-> GPU 传输的 block 数量
+            if force_load:
+                for j in range(self.topk):
+                    b_idx = block_topk[u][j]
+                    st = j * self.block_size
+                    ed = st + self.block_size
+                    global_block_map[u][j] = b_idx
+
+                    assert b_idx in self.cached_blocks[u]
+                    is_pcie_transfer = self.global_blocks[u][b_idx].load((global_h_k[u, :, st:ed, :], global_h_v[u, :, st:ed, :]), force_load=True)
+                    if is_pcie_transfer:
+                        num_pcie_transfer += 1
+
+                print(f"cpu->gpu transfer: {num_pcie_transfer}/{len(block_topk[u])}")
+                continue
+
+
             for b_idx in block_topk[u]:
+                # 相邻 decode 相似性：现在 buffer 里是上一个 decode 使用的 block，如果已经在 buffer 当中，就不需要 load 了
                 if b_idx in global_block_map[u]:
                     continue
 
                 st = -1
                 ed = -1
                 for j in range(self.topk):
+                    # 在 buffer 中找到一个不在 topk 中的 block，把它替换掉
                     if global_block_map[u][j] == -1 or global_block_map[u][j] not in block_topk[u]:
                         st = j * self.block_size
                         ed = st + self.block_size
@@ -416,9 +470,10 @@ class ContextManager:
 
                 
                 assert b_idx in self.cached_blocks[u]
-                self.global_blocks[u][b_idx].load((global_h_k[u, :, st:ed, :], global_h_v[u, :, st:ed, :]))
-
-             
+                is_pcie_transfer = self.global_blocks[u][b_idx].load((global_h_k[u, :, st:ed, :], global_h_v[u, :, st:ed, :]))
+                if is_pcie_transfer:
+                    num_pcie_transfer += 1
+            print(f"cpu->gpu transfer: {num_pcie_transfer}/{len(block_topk[u])}")
         init_st = block_num * self.block_size
         init_ed = init_st + init_len
         if self.global_buffer_init_st != init_st or self.global_buffer_init_ed != init_ed:
@@ -491,7 +546,10 @@ class ContextManager:
         # calc topk global repr k and load cache
         with torch.cuda.stream(GLOBAL_STREAM):
             block_topk = self.calc_block_topk(global_q)
-            
+            # if global_q.size(2) == 1: # decode
+            #     print(block_topk[0])
+
+            # 如果 block_topk 中有 n_remove 个不在 cached_blocks 里面的元素，先从 CUDACache 里面使用 LRU 剔除掉 n_remove 个元素腾出空间
             for u in range(self.num_units):
                 num_remove = len(self.cached_blocks[u]) - self.max_cached_block
                 for bidx in block_topk[u]:
@@ -517,10 +575,20 @@ class ContextManager:
             # get global_h_k, global_h_v, global_mask
             #    Beacuse exc_block_size <= n_local, no global_k, global_v used in global part
             global_h_q = global_q
-            global_h_k, global_h_v, global_sliding_window, global_block_map, global_block_num = self.get_global_hidden_and_mask(local_h_q.size(-2), block_topk)
+
+            start_time = time.perf_counter()
+
+            force_load = True and global_q.size(2) == 1
+
+            # 用 [topk blocks | init tokens | local tokens] 组成 buffer
+            global_h_k, global_h_v, global_sliding_window, global_block_map, global_block_num = self.get_global_hidden_and_mask(local_h_q.size(-2), block_topk, force_load=force_load)
 
         if self.async_global_stream:
             torch.cuda.current_stream().wait_stream(GLOBAL_STREAM)
+
+        end_time = time.perf_counter()
+        if global_q.size(2) == 1: # only decode
+            print(f"load cache: {(end_time-start_time)*1000}ms")
 
         # calc global result
         attn.append(
