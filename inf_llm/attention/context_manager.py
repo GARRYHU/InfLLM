@@ -3,6 +3,7 @@ from typing import Optional, Tuple
 from copy import deepcopy
 from .dot_production_attention import get_multi_stage_dot_production_attention
 import time
+import inf_llm.utils.debug_var as debug_var
 class CudaCache:
     def __init__(self, num_units, unit_size, dtype):
         self.num_units = num_units
@@ -549,28 +550,34 @@ class ContextManager:
             # if global_q.size(2) == 1: # decode
             #     print(block_topk[0])
 
-            # 如果 block_topk 中有 n_remove 个不在 cached_blocks 里面的元素，先从 CUDACache 里面使用 LRU 剔除掉 n_remove 个元素腾出空间
-            for u in range(self.num_units):
-                num_remove = len(self.cached_blocks[u]) - self.max_cached_block
-                for bidx in block_topk[u]:
-                    if bidx not in self.cached_blocks[u]:
-                        num_remove += 1
+            if not debug_var.force_no_load:
+                # 如果 block_topk 中有 n_remove 个不在 cached_blocks 里面的元素，先从 CUDACache 里面使用 LRU 剔除掉 n_remove 个元素腾出空间
+                for u in range(self.num_units):
+                    num_remove = len(self.cached_blocks[u]) - self.max_cached_block
+                    for bidx in block_topk[u]:
+                        if bidx not in self.cached_blocks[u]:
+                            num_remove += 1
 
-                # update cache
-                self.remove_lru_blocks(u, num_remove, block_topk[u])
+                    # update cache
+                    self.remove_lru_blocks(u, num_remove, block_topk[u])
 
-            if self.cache_strategy == "lru":
-                self.load_count += 1
+                if self.cache_strategy == "lru":
+                    self.load_count += 1
+                    for u in range(self.num_units):
+                        for bidx in block_topk[u]:
+                            self.cached_blocks[u][bidx] = self.load_count
+
+                elif self.cache_strategy == "lru-s":
+                    for u in range(self.num_units):
+                        for bidx in block_topk[u]:
+                            self.cached_blocks[u][bidx] = 0
+                else:
+                    raise ValueError
+
+            else:  # force_no_load 强制不卸载 KV
                 for u in range(self.num_units):
                     for bidx in block_topk[u]:
-                        self.cached_blocks[u][bidx] = self.load_count
-
-            elif self.cache_strategy == "lru-s":
-                for u in range(self.num_units):
-                    for bidx in block_topk[u]:
-                        self.cached_blocks[u][bidx] = 0
-            else:
-                raise ValueError
+                        self.cached_blocks[u][bidx] = 1
 
             # get global_h_k, global_h_v, global_mask
             #    Beacuse exc_block_size <= n_local, no global_k, global_v used in global part
@@ -578,7 +585,7 @@ class ContextManager:
 
             start_time = time.perf_counter()
 
-            force_load = True and global_q.size(2) == 1
+            force_load = debug_var.force_load and global_q.size(2) == 1
 
             # 用 [topk blocks | init tokens | local tokens] 组成 buffer
             global_h_k, global_h_v, global_sliding_window, global_block_map, global_block_num = self.get_global_hidden_and_mask(local_h_q.size(-2), block_topk, force_load=force_load)

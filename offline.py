@@ -8,6 +8,7 @@ import argparse
 from omegaconf import OmegaConf
 from inf_llm.utils import patch_hf, GreedySearch, patch_model_center
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import inf_llm.utils.debug_var as debug_var
 
 
 def parse_args():
@@ -19,6 +20,8 @@ def parse_args():
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--datafile", type=str, required=True)
     parser.add_argument("--output_length", type=int, default=100)
+    parser.add_argument("--force_load", action="store_true", default=False)
+    parser.add_argument("--force_no_load", action="store_true", default=False)
     args, extra_args = parser.parse_known_args()
     conf = OmegaConf.load(args.config_path)
     cli_conf = OmegaConf.from_cli(extra_args)
@@ -29,6 +32,8 @@ def parse_args():
     conf.verbose = args.verbose
     conf.datafile = args.datafile
     conf.output_length = args.output_length
+    conf.force_load = args.force_load
+    conf.force_no_load = args.force_no_load
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -49,7 +54,8 @@ def get_model_and_tokenizer(config):
         bmt.load(model, os.path.join(config.path, "pytorch_model.pt"), strict=False)
         model = patch_model_center(model, config.type, **config)
     else:
-        model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="cuda")
+        model = AutoModelForCausalLM.from_pretrained(config.path, torch_dtype=torch.bfloat16, trust_remote_code=True,
+                                                     device_map="cuda")
         model = patch_hf(model, config.type, **config)
     return model, tokenizer
 
@@ -215,8 +221,10 @@ def inference(
                 if verbose:
                     print("over length")
                 init_token_num = 128
-                prompt = tokenizer.decode(tokenized_prompt[:init_token_num].tolist() + tokenized_prompt[- (max_length - max_gen - init_token_num):].tolist())
-                tokenized_prompt = tokenizer(prompt, truncation=False, return_tensors="pt", add_special_tokens=True).input_ids[0]
+                prompt = tokenizer.decode(tokenized_prompt[:init_token_num].tolist() + tokenized_prompt[- (
+                            max_length - max_gen - init_token_num):].tolist())
+                tokenized_prompt = \
+                tokenizer(prompt, truncation=False, return_tensors="pt", add_special_tokens=True).input_ids[0]
         else:
             raise NotImplementedError
 
@@ -247,6 +255,9 @@ if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # define your model
     model, tokenizer = get_model_and_tokenizer(args.model)
+    debug_var.force_load = args.force_load
+    debug_var.force_no_load = args.force_no_load
+    assert debug_var.force_no_load & debug_var.force_load is False
     searcher = GreedySearch(model, tokenizer)
 
     prompts = list()
@@ -259,7 +270,7 @@ if __name__ == '__main__':
                 # 提取 input 和 content 字段
                 input_question = data.get('input')
                 context = data.get('context')
-                prompt = sys_prompt + context + "\n\n回答问题:"+ input_question
+                prompt = sys_prompt + context + "\n\n回答问题:" + input_question
                 prompts.append(prompt)
             except json.JSONDecodeError:
                 print("第一行内容不是有效的 JSON 格式。")
