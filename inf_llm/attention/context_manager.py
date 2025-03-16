@@ -474,7 +474,8 @@ class ContextManager:
                 is_pcie_transfer = self.global_blocks[u][b_idx].load((global_h_k[u, :, st:ed, :], global_h_v[u, :, st:ed, :]))
                 if is_pcie_transfer:
                     num_pcie_transfer += 1
-            print(f"cpu->gpu transfer: {num_pcie_transfer}/{len(block_topk[u])}")
+            if debug_var.output_miss_rate:
+                print(f"cpu->gpu transfer: {num_pcie_transfer}/{len(block_topk[u])}")
         init_st = block_num * self.block_size
         init_ed = init_st + init_len
         if self.global_buffer_init_st != init_st or self.global_buffer_init_ed != init_ed:
