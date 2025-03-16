@@ -134,7 +134,7 @@ def patch_hf(
 
     forward = huggingface_forward(ATTN_FORWRAD[attn_type](**attn_kwargs))
 
-    if isinstance(model, LlamaForCausalLM):
+    if isinstance(model, LlamaForCausalLM) or model.__class__.__name__ == "LlamaForCausalLM":
         Attention = model.model.layers[0].self_attn.__class__
         Model = model.model.__class__
     elif isinstance(model, MistralForCausalLM):
