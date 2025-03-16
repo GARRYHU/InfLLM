@@ -449,8 +449,8 @@ class ContextManager:
                     is_pcie_transfer = self.global_blocks[u][b_idx].load((global_h_k[u, :, st:ed, :], global_h_v[u, :, st:ed, :]), force_load=True)
                     if is_pcie_transfer:
                         num_pcie_transfer += 1
-
-                print(f"cpu->gpu transfer: {num_pcie_transfer}/{len(block_topk[u])}")
+                if debug_var.output_miss_rate:
+                    print(f"cpu->gpu transfer: {num_pcie_transfer}/{len(block_topk[u])}")
                 continue
 
 
@@ -547,8 +547,9 @@ class ContextManager:
         # calc topk global repr k and load cache
         with torch.cuda.stream(GLOBAL_STREAM):
             block_topk = self.calc_block_topk(global_q)
-            # if global_q.size(2) == 1: # decode
-            #     print(block_topk[0])
+            if debug_var.output_hit_log:
+                if global_q.size(2) == 1: # decode
+                    print(block_topk[0])
 
             if not debug_var.force_no_load:
                 # 如果 block_topk 中有 n_remove 个不在 cached_blocks 里面的元素，先从 CUDACache 里面使用 LRU 剔除掉 n_remove 个元素腾出空间
@@ -594,8 +595,9 @@ class ContextManager:
             torch.cuda.current_stream().wait_stream(GLOBAL_STREAM)
 
         end_time = time.perf_counter()
-        if global_q.size(2) == 1: # only decode
-            print(f"load cache: {(end_time-start_time)*1000}ms")
+        if debug_var.output_load_time:
+            if global_q.size(2) == 1: # only decode
+                print(f"load cache: {(end_time-start_time)*1000}ms")
 
         # calc global result
         attn.append(

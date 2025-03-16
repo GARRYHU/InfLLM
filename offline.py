@@ -22,6 +22,9 @@ def parse_args():
     parser.add_argument("--output_length", type=int, default=100)
     parser.add_argument("--force_load", action="store_true", default=False)
     parser.add_argument("--force_no_load", action="store_true", default=False)
+    parser.add_argument("--output_hit_log", action="store_true", default=False)
+    parser.add_argument("--output_miss_rate", action="store_true", default=False)
+    parser.add_argument("--output_load_time", action="store_true", default=False)
     args, extra_args = parser.parse_known_args()
     conf = OmegaConf.load(args.config_path)
     cli_conf = OmegaConf.from_cli(extra_args)
@@ -34,6 +37,9 @@ def parse_args():
     conf.output_length = args.output_length
     conf.force_load = args.force_load
     conf.force_no_load = args.force_no_load
+    conf.output_hit_log = args.output_hit_log
+    conf.output_miss_rate = args.output_miss_rate
+    conf.output_load_time = args.output_load_time
     if not hasattr(conf.model, "tokenizer_path"):
         conf.model.tokenizer_path = conf.model.path
     if not hasattr(conf, "truncation"):
@@ -257,6 +263,9 @@ if __name__ == '__main__':
     model, tokenizer = get_model_and_tokenizer(args.model)
     debug_var.force_load = args.force_load
     debug_var.force_no_load = args.force_no_load
+    debug_var.output_hit_log = args.output_hit_log
+    debug_var.output_miss_rate = args.output_miss_rate
+    debug_var.output_load_time = args.output_load_time
     assert debug_var.force_no_load & debug_var.force_load is False
     searcher = GreedySearch(model, tokenizer)
 
@@ -276,7 +285,12 @@ if __name__ == '__main__':
                 print("第一行内容不是有效的 JSON 格式。")
 
     i = 5
-    prompt = prompts[i]
+    # prompt = prompts[i]
+    # with open("/home/garry/llm/vllm_ini/text5400.txt", "r") as f:
+    #     content = f.read()
+    # prompt = content
+    prompt_token_ids = tokenizer(prompt, truncation=False, return_tensors="pt", add_special_tokens=True).input_ids[0]
+    print(f"prompt length = {prompt_token_ids.size(0)}")
     output = inference(
         searcher=searcher,
         tokenizer=tokenizer,
